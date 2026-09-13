@@ -1,3 +1,9 @@
 CameraID,Latitude,Longitude,RoadSegment,Direction,LocationName
-4798,1.25999999687243,103.823611110166,sentosa_gateway_outbound,Towards Telok Blangah,Sentosa Tower 1
-4799,1.26027777363278,103.823888890049,sentosa_gateway_inbound,Towards Sentosa,Sentosa Tower 2
+2701,1.447023728,103.7716543,causeway,Towards Johor,Woodlands Causeway
+2702,1.445554109,103.7683397,causeway,Towards BKE,Woodlands Checkpoint
+2704,1.429588536,103.769311,causeway,Towards Checkpoint,Woodlands Flyover
+4703,1.348697862,103.6350413,second_link,Second Link view,Tuas Second Link
+4712,1.341244001,103.6439134,second_link,Towards Tuas,After Tuas West Road
+4713,1.347645829,103.6366955,second_link,Checkpoint view,Tuas Checkpoint
+4798,1.25999999687243,103.823611110166,sentosa_gateway,Towards Telok Blangah,Sentosa Tower 1
+4799,1.26027777363278,103.823888890049,sentosa_gateway,Towards Sentosa,Sentosa Tower 2

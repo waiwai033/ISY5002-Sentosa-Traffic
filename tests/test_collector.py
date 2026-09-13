@@ -18,7 +18,7 @@ class CollectorTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.output = Path(self.tmp.name)
-        self.cameras = c.load_cameras(c.ROOT / "reference/camera_info.csv")
+        self.cameras = c.load_cameras(c.ROOT / "reference/camera_sentosa.csv")
         self.now = datetime(2026, 9, 13, 6, 20, tzinfo=timezone.utc)
 
     def payload(self, timestamp=None):
@@ -31,9 +31,51 @@ class CollectorTests(unittest.TestCase):
                           metadata if url == c.ENDPOINTS["data-gov-sg"] else content):
             return c.collect_cycle(self.cameras, self.output, "data-gov-sg", {}, now=now or self.now)
 
-    def test_real_configuration_excludes_original_research(self):
-        self.assertEqual({x["CameraID"] for x in self.cameras}, {"4798", "4799"})
-        self.assertTrue(c.OLD_RESEARCH_CAMERAS.isdisjoint(x["CameraID"] for x in self.cameras))
+    def test_real_configuration_has_eight_cameras_in_three_groups(self):
+        cameras = c.load_cameras(c.ROOT / "reference/camera_info.csv")
+        self.assertEqual({x["CameraID"] for x in cameras},
+                         {"2701", "2702", "2704", "4703", "4712", "4713", "4798", "4799"})
+        self.assertEqual({group: sum(x['RoadSegment'] == group for x in cameras)
+                          for group in {x['RoadSegment'] for x in cameras}},
+                         {'causeway': 3, 'second_link': 3, 'sentosa_gateway': 2})
+
+    def test_week_plan_is_exactly_1008_rounds(self):
+        plan = json.loads((c.ROOT / 'reference/collection_week.json').read_text())
+        start, end = map(c.parse_timestamp, (plan['start_at'], plan['end_at']))
+        self.assertEqual(start.weekday(), 6)
+        self.assertEqual(start.astimezone(c.SG).weekday(), 0)
+        self.assertEqual((end-start).total_seconds() / (plan['interval_minutes']*60), 1008)
+
+    def test_future_start_grid_and_exclusive_end(self):
+        anchor = datetime(2026, 9, 13, 16, tzinfo=timezone.utc)
+        clock = {'now': anchor - timedelta(seconds=2)}
+        calls = []
+        class FakeDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return clock['now'].astimezone(tz)
+        def sleep(seconds):
+            clock['now'] += timedelta(seconds=seconds)
+        def collect(*args, **kwargs):
+            calls.append(clock['now'])
+            clock['now'] += timedelta(seconds=5)
+            return [{'status': 'downloaded'}]
+        with patch.object(c, 'datetime', FakeDatetime), \
+             patch.object(c.time, 'monotonic', side_effect=lambda: clock['now'].timestamp()), \
+             patch.object(c.time, 'sleep', side_effect=sleep), \
+             patch.object(c, 'collect_cycle', side_effect=collect):
+            code = c.main(['--start-at', c.iso(anchor), '--end-at', c.iso(anchor+timedelta(minutes=30)),
+                           '--interval-minutes', '10', '--active-start', '00:00',
+                           '--output-dir', str(self.output)])
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, [anchor+timedelta(minutes=i) for i in (0,10,20)])
+
+    def test_expired_campaign_makes_no_requests(self):
+        with patch.object(c, 'collect_cycle') as collect:
+            result = c.main(['--start-at', '2020-01-01T00:00:00+08:00',
+                             '--end-at', '2020-01-02T00:00:00+08:00'])
+        self.assertEqual(result, 0)
+        collect.assert_not_called()
 
     def test_restart_dedup_and_timezone_rollover(self):
         now = self.now.replace(hour=18)

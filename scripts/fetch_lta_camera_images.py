@@ -26,7 +26,6 @@ ENDPOINTS = {
     "data-gov-sg": "https://api.data.gov.sg/v1/transport/traffic-images",
     "lta": "https://datamall2.mytransport.sg/ltaodataservice/Traffic-Imagesv2",
 }
-OLD_RESEARCH_CAMERAS = {"2701", "2702", "2704", "2706", "4703", "4707", "4712", "4713"}
 FIELDS = ["collected_at_utc", "collected_at_sgt", "camera_id", "road_segment",
           "direction", "source", "captured_at_utc", "captured_at_sgt", "timestamp_basis",
           "status", "image_path", "sha256", "bytes", "source_url", "error"]
@@ -75,8 +74,6 @@ def load_cameras(path):
         cid = camera["CameraID"]
         if not re.fullmatch(r"\d+", cid) or cid in seen:
             raise ValueError("Camera IDs must be unique numeric strings")
-        if cid in OLD_RESEARCH_CAMERAS:
-            raise ValueError(f"Camera {cid} overlaps with the original research dataset")
         for column in ("RoadSegment", "Direction", "Latitude", "Longitude"):
             if not camera.get(column):
                 raise ValueError(f"Missing {column} for {cid}")
@@ -207,6 +204,12 @@ def collect_cycle(cameras, output, source, headers, max_age_minutes=15, now=None
     return rows
 
 
+def next_tick(now, anchor, interval_seconds):
+    """Next future sampling time on a fixed grid; never drift with download duration."""
+    elapsed = (now - anchor).total_seconds()
+    return anchor + timedelta(seconds=(math.floor(elapsed / interval_seconds) + 1) * interval_seconds)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--camera-csv", type=Path, default=ROOT / "reference/camera_info.csv")
@@ -217,8 +220,16 @@ def main(argv=None):
     parser.add_argument("--active-start", type=parse_clock, default=parse_clock("05:00"))
     parser.add_argument("--active-end", type=parse_clock, default=parse_clock("24:00"))
     parser.add_argument("--max-age-minutes", type=positive, default=15)
+    parser.add_argument("--start-at", type=parse_timestamp, help="Inclusive start, ISO timestamp with timezone")
+    parser.add_argument("--end-at", type=parse_timestamp, help="Exclusive end, ISO timestamp with timezone")
     parser.add_argument("--once", action="store_true", help="Run one cycle now, ignoring active hours")
     args = parser.parse_args(argv)
+    if bool(args.start_at) != bool(args.end_at):
+        parser.error("Provide both --start-at and --end-at")
+    if args.start_at and args.start_at >= args.end_at:
+        parser.error("--end-at must follow --start-at")
+    if args.once and args.start_at:
+        parser.error("--once cannot be combined with a dated collection window")
     if args.active_start == 86400 or args.active_start == args.active_end:
         parser.error("Invalid active window; use 00:00 to 24:00 for all day")
     key_name = "LTA_API_KEY" if args.source == "lta" else "DATA_GOV_SG_API_KEY"
@@ -228,7 +239,14 @@ def main(argv=None):
     headers = {("AccountKey" if args.source == "lta" else "X-Api-Key"): key} if key else {}
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cameras = load_cameras(args.camera_csv)
-    deadline = time.monotonic() + args.duration_days * 86400
+    now = datetime.now(UTC)
+    if args.end_at and now >= args.end_at:
+        logging.info("Collection window has ended; no images requested")
+        return 0
+    wait_before_start = max(0, (args.start_at - now).total_seconds()) if args.start_at else 0
+    if wait_before_start:
+        logging.info("Waiting until %s Singapore time; no requests before then", args.start_at.astimezone(SG).isoformat())
+    deadline = time.monotonic() + wait_before_start + args.duration_days * 86400
     interval = args.interval_minutes * 60
     cycles, successes, last_success = 0, 0, False
     # A process-level lock prevents accidental concurrent writes on macOS/Linux.
@@ -241,6 +259,12 @@ def main(argv=None):
             logging.error("Another collector is already using this output directory")
             return 1
         while time.monotonic() < deadline:
+            now = datetime.now(UTC)
+            if args.end_at and now >= args.end_at:
+                break
+            if args.start_at and now < args.start_at:
+                time.sleep(min(60, (args.start_at - now).total_seconds()))
+                continue
             started = time.monotonic()
             local = datetime.now(SG)
             seconds = local.hour * 3600 + local.minute * 60 + local.second
@@ -251,9 +275,13 @@ def main(argv=None):
                 successes += int(last_success)
                 if args.once:
                     return 0 if last_success else 1
-                delay = max(0, started + interval - time.monotonic())
+                after = datetime.now(UTC)
+                delay = ((next_tick(after, args.start_at, interval) - after).total_seconds()
+                         if args.start_at else max(0, started + interval - time.monotonic()))
             else:
                 delay = 60
+            if args.end_at:
+                delay = min(delay, (args.end_at - datetime.now(UTC)).total_seconds())
             time.sleep(max(0, min(delay, deadline - time.monotonic())))
     logging.info("Finished: %d cycles, %d complete cycles", cycles, successes)
     return 0 if successes and last_success else 1

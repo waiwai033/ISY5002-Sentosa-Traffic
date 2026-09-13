@@ -1,87 +1,81 @@
-name: Collect Sentosa traffic images
+name: Collect eight traffic cameras
 
 on:
   workflow_dispatch:
     inputs:
       duration_minutes:
-        description: '0 = one sample cycle; otherwise 1-295 minutes'
+        description: '0 = trial now; 1-355 = dated campaign batch'
         default: '0'
         required: true
   schedule:
-    # Singapore 05:00, 10:00, 15:00, 20:00; explicit opt-in and stop date below.
-    - cron: '0 21,2,7,12 * * *'
+    # UTC -> Singapore 00:00, 06:00, 12:00, 18:00.
+    - cron: '0 16,22,4,10 * * *'
 
 permissions:
   contents: read
 
 concurrency:
-  group: sentosa-collection
+  group: traffic-collection
   cancel-in-progress: false
 
 jobs:
   collect:
     if: github.event_name == 'workflow_dispatch' || vars.COLLECTION_ENABLED == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 320
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Validate collection window
+      - name: Validate campaign window
         id: window
         env:
           EVENT: ${{ github.event_name }}
           DURATION: ${{ inputs.duration_minutes || '0' }}
-          COLLECTION_UNTIL_UTC: ${{ vars.COLLECTION_UNTIL_UTC }}
         run: |
           python - <<'PY'
-          import os
-          from datetime import datetime, timezone, timedelta
-          from zoneinfo import ZoneInfo
+          import os, sys
+          from datetime import datetime, timezone
+          from pathlib import Path
+          sys.path.insert(0, 'scripts')
+          from run_collection_week import load_plan
+          plan, start, end, cameras = load_plan(Path('reference/collection_week.json'))
           now = datetime.now(timezone.utc)
-          if os.environ['EVENT'] == 'schedule':
-              value = os.environ.get('COLLECTION_UNTIL_UTC', '')
-              if not value:
-                  raise SystemExit('Set COLLECTION_UNTIL_UTC before enabling scheduled collection')
-              end = datetime.fromisoformat(value.replace('Z', '+00:00'))
-              if end.tzinfo is None:
-                  raise SystemExit('COLLECTION_UNTIL_UTC must include timezone')
-              local = now.astimezone(ZoneInfo('Asia/Singapore'))
-              midnight = (local + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-              minutes = min(295, (end - now).total_seconds() / 60,
-                            (midnight - local).total_seconds() / 60)
-              run = minutes > 0 and local.hour >= 5
-          else:
-              minutes = float(os.environ['DURATION'])
-              if not 0 <= minutes <= 295:
-                  raise SystemExit('Duration must be between 0 and 295 minutes')
-              run = True
+          minutes = 355 if os.environ['EVENT'] == 'schedule' else float(os.environ['DURATION'])
+          if not 0 <= minutes <= 355:
+              raise SystemExit('Duration must be between 0 and 355 minutes')
+          trial = os.environ['EVENT'] == 'workflow_dispatch' and minutes == 0
+          run = trial or start <= now < end
+          if not trial:
+              minutes = max(0, min(minutes, (end - now).total_seconds() / 60))
+          path = 'data/trial-eight-cameras' if trial else plan['output_dir']
           with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
-              stream.write(f'run={str(run).lower()}\nminutes={max(0, minutes)}\n')
+              stream.write(f'run={str(run).lower()}\nminutes={minutes}\npath={path}\n')
           PY
-      - name: Collect images and manifests
+      - name: Collect images and manifest
         if: steps.window.outputs.run == 'true'
         env:
           DATA_GOV_SG_API_KEY: ${{ secrets.DATA_GOV_SG_API_KEY }}
+          LTA_API_KEY: ${{ secrets.LTA_API_KEY }}
           MINUTES: ${{ steps.window.outputs.minutes }}
         run: |
           python - <<'PY'
           import os, subprocess, sys
           minutes = float(os.environ['MINUTES'])
-          command = [sys.executable, 'scripts/fetch_lta_camera_images.py']
-          command += ['--once'] if minutes == 0 else ['--duration-days', str(minutes / 1440)]
+          command = [sys.executable, 'scripts/run_collection_week.py']
+          command += ['--once'] if minutes == 0 else ['--max-runtime-minutes', str(minutes)]
           subprocess.run(command, check=True)
           PY
-      - name: Preserve data even if some cameras fail
+      - name: Preserve images and metadata
         if: always() && steps.window.outputs.run == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: sentosa-images-${{ github.run_id }}-${{ github.run_attempt }}
+          name: traffic-images-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            data/lta_images/images/
-            data/lta_images/metadata/
-            data/lta_images/manifest.csv
-            data/lta_images/state.json
+            ${{ steps.window.outputs.path }}/images/
+            ${{ steps.window.outputs.path }}/metadata/
+            ${{ steps.window.outputs.path }}/manifest.csv
+            ${{ steps.window.outputs.path }}/state.json
           if-no-files-found: warn
           retention-days: 30

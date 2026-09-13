@@ -1,152 +1,169 @@
-# ISY5002 · Sentosa Gateway 交通拥堵预测数据采集
+# ISY5002 · 三路段交通图像采集
 
-本课程项目从 Sentosa Gateway 重新采集交通图像。沿用旧项目
-`IND5003_GP17_Traffic-master` 的“定时获取摄像头图片 → 车辆密度 → 拥堵预测”思路，
-当前实现范围是数据采集，不包含模型训练。原项目文件没有被修改。
+当前配置采集实时接口可用的 8 个摄像头，覆盖 Causeway、Second Link 和 Sentosa
+Gateway 三个路段组。采集方式沿用旧项目：定时请求 API、下载图片、保存每轮记录。
+本仓库最初只采 Sentosa，因此仓库名称保留 `ISY5002-Sentosa-Traffic`。
+当前尚未运行 YOLO 或训练模型。
 
-## 路段选择
+## 本周采集计划
 
-| CameraID | 官方点位 | 页面标注方向 | 新项目分组 |
-|---|---|---|---|
-| 4798 | Sentosa Tower 1 | Towards Telok Blangah | sentosa_gateway_outbound |
-| 4799 | Sentosa Tower 2 | Towards Sentosa | sentosa_gateway_inbound |
+| 参数 | 设置 |
+|---|---|
+| 开始时间 | 2026-09-14 周一 00:00，新加坡时间 |
+| 结束时间 | 2026-09-21 周一 00:00，新加坡时间，不含该时刻 |
+| 间隔 | 每 10 分钟一轮，全天 24 小时 |
+| 计划轮次 | 1,008 轮；无缺帧时最多 8,064 张 |
+| 数据目录 | `data/week-20260914/` |
+| 配置文件 | `reference/collection_week.json` |
 
-2026-09-13 核验了官方页面、API 返回和真实图片。实时公开接口当时返回
-2701、2702、2704、4703、4712、4713、4798、4799；选中的两点均可用。
-原项目研究的 8 个点位为 2701、2702、2704、2706、4703、4707、4712、4713，
-因此新研究点位与旧研究集合不重叠。旧的 `camera_info.csv` 实际是全岛目录，
-包含 4798、4799；“不同”指与旧项目最终研究路段不同，不是与全岛目录不同。
+时间窗口使用带 `+08:00` 的 ISO 时间戳。对应 UTC 起止为
+2026-09-13 16:00 到 2026-09-20 16:00。最后一个正常计划采样点是
+2026-09-20 23:50 新加坡时间。
 
-这里是同一条道路的两个观测点，不是两条独立高速公路。4799 的画面同时包含
-双向车道，4798 有高架设施遮挡。Direction 是官方页面的视角名称，不保证整张图
-只有一个行车方向。后续需要分别标注 ROI，按车道方向计算密度，不能直接给整张图
-的车辆总数贴“进岛/出岛”标签，也不要把两台摄像头简单多数投票合并。
+| 路段组 | CameraID | 点位 |
+|---|---|---|
+| causeway | 2701 / 2702 / 2704 | Woodlands Causeway / Checkpoint / Flyover |
+| second_link | 4703 / 4712 / 4713 | Tuas Second Link / After Tuas West Road / Checkpoint |
+| sentosa_gateway | 4798 / 4799 | 朝 Telok Blangah / 朝 Sentosa |
 
-## 快速开始
+这里“新 8 个”指本次重新采集的集合，其中前 6 个与旧研究集合重叠。
+根据当前请求，已移除脚本的旧摄像头排除逻辑。旧研究的 2706、4707 当前未返回。
+原先的 Sentosa 两点配置保留在 `reference/camera_sentosa.csv`。
 
-要求 Python 3.11+、macOS 或 Linux；采集程序仅使用标准库，无需安装第三方包。
+官方说明从 2026-06-30 起，仅保留关卡及部分连接道路和 Sentosa Gateway 的服务。
+[公告](https://onemotoring.lta.gov.sg/content/onemotoring/home/digitalservices/view-traffic-cameras.html)。
+这是三个研究路段组，不代表每张图只包含一个行车方向。
 
-```bash
-python3 scripts/fetch_lta_camera_images.py --once
-```
+## 检查配置与试采
 
-默认使用 [data.gov.sg 的实时交通图片接口](https://api.data.gov.sg/v1/transport/traffic-images)。
-根据[官方说明](https://guide.data.gov.sg/developer-guide/api-overview)，无 Key 可以测试；
-持续采集建议设置 `DATA_GOV_SG_API_KEY` 环境变量。不要把密钥写进代码或提交 Git。
-`.env.example` 仅作变量说明，脚本不会自动加载 `.env`。
-
-直接复用原项目的 LTA DataMall 接口也已保留：
-
-```bash
-# 先在终端环境配置 LTA_API_KEY
-python3 scripts/fetch_lta_camera_images.py --source lta --once
-```
-
-本次已实测 data.gov.sg 路径；LTA 路径做过模拟接口测试，因当前环境没有 LTA Key，
-尚未进行带 Key 的在线验证。两者不会自动切换，以保持数据来源可追溯。
-
-## 连续采集
-
-与旧项目一致，默认每 5 分钟、每天新加坡时间 05:00–24:00，持续 7 天：
+Python 3.11+，macOS/Linux；程序只使用标准库。
+在本仓库根目录运行：
 
 ```bash
-python3 scripts/fetch_lta_camera_images.py --duration-days 7
+python3 scripts/run_collection_week.py --check
+python3 scripts/run_collection_week.py --once
 ```
 
-macOS 可防止空闲睡眠（需要保持供电、联网；合盖可能仍影响运行）：
+`--check` 只显示计划；`--once` 立即试采一轮，并保存到独立的
+`data/trial-eight-cameras/`，不会混入正式一周的数据。
+
+## 本机或服务器运行
 
 ```bash
-caffeinate -i python3 scripts/fetch_lta_camera_images.py --duration-days 7
+python3 scripts/run_collection_week.py
 ```
 
-程序在前台运行，Ctrl+C 停止，重新启动可继续写入同一目录并识别重复帧。
-同一目录不允许两个采集进程同时写入。时长按本次进程启动时间计算，不跨重启累加。
+可以在开始时间前启动，程序会等待到 9 月 14 日 00:00；每 10 分钟采集一次，
+9 月 21 日 00:00 停止。若中途启动，先请求当前图像，再对齐下一采样时刻；
+不会把当前图像伪装成错过时刻的历史数据。重启不会推迟计划结束日期。
 
-可调整参数：
+macOS 保持前台运行并防止空闲睡眠：
 
 ```bash
-python3 scripts/fetch_lta_camera_images.py \
-  --interval-minutes 5 --duration-days 28 \
-  --active-start 05:00 --active-end 24:00 \
-  --output-dir data/lta_images
+caffeinate -i python3 scripts/run_collection_week.py
 ```
 
-两台摄像头按 19 小时/天、5 分钟一次估算：每日 456 张，7 天 3,192 张，
-28 天 12,768 张；这是假定每次都有新帧的上限估算，重复、延迟和缺帧会减少实际数量。
-首批样本平均约 175 KB/张，因此 7 天原始 JPEG 约 0.56 GB，28 天约 2.23 GB，
-不含元数据，图片大小也会随画面变化。7 天适合试点，正式建模可考虑多个完整星期。
+必须保持供电、联网，终端进程不可退出；合盖仍可能影响运行。Ctrl+C 停止。
+单个输出目录只允许一个采集进程写入。软件调度和网络均存在延迟，因此时间戳记录
+实际采集时刻与源图片时刻，而非声称硬实时精度。
 
-## 输出与数据质量
+## 按旧项目方式使用 GitHub Actions
+
+工作流 `Collect eight traffic cameras` 已准备，持续排程默认关闭。
+本机不需要一直开机；不需要 AWS。图片保存到 GitHub Actions artifact，保留 30 天。
+
+启用步骤：
+
+1. 确认默认分支上的 `reference/collection_week.json` 是上述一周计划。
+2. 到 Settings → Secrets and variables → Actions → Variables 新建
+   `COLLECTION_ENABLED`，值为 `true`。
+3. 到 Actions 查看运行记录。要手动试采，运行工作流，`duration_minutes=0`。
+4. 停止后续排程，把 `COLLECTION_ENABLED` 改为 `false`。已有运行需在 Actions 中取消。
+
+也可以执行：
+
+```bash
+# 启用持续排程（会使用私有仓库 Actions 额度）
+gh variable set COLLECTION_ENABLED --body true --repo waiwai033/ISY5002-Sentosa-Traffic
+# 关闭后续排程
+gh variable set COLLECTION_ENABLED --body false --repo waiwai033/ISY5002-Sentosa-Traffic
+```
+
+排程每天新加坡时间 00:00、06:00、12:00、18:00 启动（UTC 16、22、4、10 点）。
+每批最多 355 分钟；每轮间隔 10 分钟，距 GitHub 的 6 小时任务上限预留约 5 分钟。
+程序同时检查固定起止日期，开始前和结束后不会采图；采集结束后建议关闭开关，
+避免以后继续产生只检查时间的空运行。
+
+GitHub cron 可能延迟或丢弃触发，批次排队可能造成缺口，不能保证首轮精确在
+00:00 执行。如果时间连续性是硬要求，优先使用提前启动的常开机器或服务器。
+见 [GitHub 定时任务说明](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)。
+
+按每天四批计算，一周采集进程约 9,940 分钟，加启动和上传开销约 1 万分钟。
+这是运行时长估算，不是已发生的用量。私有仓库一般会超出免费分钟额度；
+8 台摄像头本次试采合计约 1.60 MB/轮，一周原始 JPEG 约 1.61 GB，另有元数据，
+也可能超过附件存储额度。实际取决于账户套餐、剩余额度、图片变化和缺帧。
+见 [GitHub 额度与限制](https://docs.github.com/en/actions/reference/limits)。
+AWS S3 可以作为未来的长期存储方案，但不会减少 GitHub 运行分钟消耗；本仓库当前
+没有 S3 上传功能。
+
+下载附件并及时归档：
+
+```bash
+gh run download RUN_ID --repo waiwai033/ISY5002-Sentosa-Traffic --dir data/github/RUN_ID
+```
+
+不同 Actions 批次各自保存 manifest 和状态；合并时按 `camera_id + sha256` 去重，
+不把多个不同摄像头的相似画面当成同一观测。附件应在 30 天内下载。
+
+## 数据来源与密钥
+
+默认使用 [data.gov.sg 实时交通图像接口](https://api.data.gov.sg/v1/transport/traffic-images)，
+目前已实测无 Key 可采。依据[官方说明](https://guide.data.gov.sg/developer-guide/api-overview)，
+无 Key 可用于测试，持续采集建议申请并配置 `DATA_GOV_SG_API_KEY`：本机放环境变量，
+GitHub 放同名 Actions Secret。不要把 Key 放入代码；`.env` 不会自动加载。
+
+也保留了旧项目的 LTA DataMall `Traffic-Imagesv2` 路径：把配置中的 `source` 改为
+`lta` 并设置 `LTA_API_KEY`。LTA 带 Key 路径仅做过模拟测试，当前没有凭据进行实测。
+不自动切换数据来源。`.env.example` 说明了变量名称。
+
+## 文件与数据质量
+
+正式数据保存为：
 
 ```text
-data/lta_images/
-  images/4798/*.jpg
-  images/4799/*.jpg
+data/week-20260914/
+  images/<camera-id>/*.jpg
   metadata/*.json
   manifest.csv
   state.json
 ```
 
-图片、日志和密钥被 Git 忽略；Git 保存采集代码和配置。
+- CSV 每轮每台摄像头一行，记录路段组、方向、源图像时间、采集时间、UTC/SGT、
+  SHA256、字节数、路径和状态。
+- 状态：downloaded / duplicate / missing / stale / error。请求失败自动重试。
+- 同一内容重复返回时保留记录并复用文件；不强行凑足 8,064 张。
+- data.gov.sg 使用源图片时间；超过 15 分钟或未来超过 5 分钟标为 stale。
+- LTA 时间标记为 collection_time_proxy，因为该接口没有规范化拍摄时间字段。
+- JPEG 首尾标记检查用于排除错误页和部分截断；后续分析仍需完整解码及画质检查。
+- 图片、日志、密钥均被 Git 忽略；LTA 签名 URL 查询参数不会写入归档。
 
-- `manifest.csv` 每轮每台摄像头均记录一行，包含来源、方向、采集时间、图像时间、
-  SHA256、相对路径、字节数与状态。
-- 状态有 `downloaded`、`duplicate`、`missing`、`stale`、`error`。
-- 同一内容重复返回时记录 duplicate 并复用图片文件；分析时按 camera_id + sha256 去重。
-- data.gov.sg 使用源图像时间，同时保存 UTC 和新加坡时间；超过 15 分钟或未来超过
-  5 分钟的时间戳标记 stale，不下载为训练样本。
-- LTA 未提供规范化拍摄时间，标记 `collection_time_proxy`，不能声称是精确拍摄时间。
-- 请求失败自动重试；JPEG 首尾标记不完整会拒绝保存。该检查不是完整的图像解码验证，
-  后续视觉处理仍应执行解码检查和画质筛选。
-- 元数据与成功样本持久化；LTA 签名 URL 的查询参数不会写入归档。
+车辆识别时按相应 images 根目录读取，优先用 manifest 的 `captured_at_sgt` 关联时间。
+需要按车道方向新标 ROI，避免混合相反方向和高架遮挡。路段分组不等于可以直接
+对所有摄像头多数投票。保留缺帧，不无限前向填充；后续先按时间划分数据，再生成
+滑动窗口，避免训练/验证重叠造成信息泄漏。
 
-图片目录可供旧项目车辆密度脚本读取，但建议改为通过 manifest 的
-`captured_at_sgt` 关联时间。新的文件名各个时间片段统一采用 UTC，避免旧项目中
-“UTC 日期 + 新加坡时分”混用。缺帧必须保留，不能把凌晨未采集时段无限前向填充。
-
-## GitHub Actions
-
-工作流 `Collect Sentosa traffic images` 已配置：
-
-1. 单次试采：在 Actions 中手动运行，`duration_minutes=0`。
-2. 短时采集：设为 1–295 分钟；每天仍遵守 05:00–24:00。
-3. 持续排程：先设置仓库变量 `COLLECTION_UNTIL_UTC`（带时区的 ISO 时间），
-   然后设置 `COLLECTION_ENABLED=true`；默认未启用。
-4. 需要时添加 Actions Secret `DATA_GOV_SG_API_KEY`。
-5. 数据存放在每次运行的 `sentosa-images-...` artifact，保留 30 天；到期前下载归档。
-   下载单次：`gh run download RUN_ID --repo waiwai033/ISY5002-Sentosa-Traffic --dir data/github/RUN_ID`。
-
-排程与旧项目一样在新加坡时间 05:00、10:00、15:00、20:00 启动；前三段最长
-295 分钟，晚间段最多到午夜，给退出和上传预留时间。默认不开 S3 上传；本项目
-采用本地文件和 Actions artifact 保存数据，避免旧工作流在未配置 S3 时丢弃下载结果。
-
-GitHub [定时任务可能延迟](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)，
-批次交接也可能有缺口，不能保证无间断 5 分钟采样。不同运行使用临时机器，
-去重状态不跨 Actions 批次共享，合并数据时需再次去重。
-
-长时间等待同样消耗私有仓库的运行分钟数。完整采集约 1,125 分钟/天、
-7 天约 7,875 分钟，另加启动与上传；可能超过账户免费额度。
-额度与存储限制见 [GitHub 官方说明](https://docs.github.com/en/actions/reference/limits)。
-若需要稳定长期采集，可在常开本机或服务器运行此脚本。
-
-## 验证与后续研究
+## 验证与来源
 
 ```bash
 python3 -m unittest discover -s tests -v
 ```
 
-测试覆盖：旧点位隔离、时区跨日、重启去重、过期帧、缺失点位、非图片响应、
-网络失败、LTA 签名链接脱敏、跨午夜采集窗口、非法间隔。
-试采证据见 `docs/verification.md`。
+10 项测试覆盖八点三组配置、跨日、一周轮数、提前等待、10 分钟网格、结束时刻排除、
+过期计划不请求、去重、缺帧、过期图、网络失败及链接脱敏。
+2026-09-13 新八点本地试采全部成功；早期 Sentosa 两点验证见 `docs/verification.md`。
 
-后续优化建议：先做双向车道 ROI 与图像质量核验；积累多个星期后按时间顺序划分
-训练/验证/测试，先划分再生成滑动窗口，避免旧项目随机拆分重叠窗口的信息泄漏。
-车辆密度或聚类标签属于拥堵代理指标，不能当作独立测得的真实速度。
-
-## 来源与项目继承
-
-- 采集流程参考本地旧项目 `IND5003_GP17_Traffic-master/scripts/fetch_lta_camera_images.py`
-  与 `.github/workflows/fetch_lta_images.yml`；本仓库重新实现采集，不复制旧模型和数据集。
-- 官方点位名称：[LTA API Guide，Annex G](https://datamall.lta.gov.sg/content/dam/datamall/datasets/LTA_DataMall_API_User_Guide.pdf)。
-- 方向映射：[OneMotoring Traffic Cameras](https://onemotoring.lta.gov.sg/content/onemotoring/home/driving/traffic_information/traffic-cameras.html)。
-- 数据归 LTA / 相应数据提供方所有；本仓库没有为第三方图像另行授予许可。
+采集思路来自本地 `IND5003_GP17_Traffic-master`；原项目未被修改。
+坐标来自旧项目目录并由实时接口核对；位置名称参考
+[LTA API Guide Annex G](https://datamall.lta.gov.sg/content/dam/datamall/datasets/LTA_DataMall_API_User_Guide.pdf)
+和 [OneMotoring](https://onemotoring.lta.gov.sg/content/onemotoring/home/driving/traffic_information/traffic-cameras.html)。
+数据归 LTA / 相应提供方所有，本仓库不为第三方图像另行授予许可。
