@@ -18,3 +18,13 @@
 
 `python3 -m unittest discover -s tests -v`：7 项测试通过。
 LTA 带密钥路径仅经过模拟测试；本机未配置 LTA_API_KEY。
+
+## GitHub 云端试采
+
+- 私有仓库：`waiwai033/ISY5002-Sentosa-Traffic`，默认分支 main。
+- [运行 34743008577](https://github.com/waiwai033/ISY5002-Sentosa-Traffic/actions/runs/34743008577)
+  于 2026-09-13 成功完成，参数 `duration_minutes=0`。
+- 生成附件 `sentosa-images-34743008577-1`，ZIP 大小 335251 字节。
+- 附件已下载回本地 `data/github/34743008577/`；两台摄像头均为 downloaded，
+  图片字节数与 SHA256 均与 manifest 一致。
+- 未使用 AWS、未设置 API Key，未开启持续采集排程。
