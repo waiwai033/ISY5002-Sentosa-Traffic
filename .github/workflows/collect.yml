@@ -14,16 +14,19 @@ on:
         default: '55'
         required: false
   schedule:
-    # One short job per sample, on the campaign's ten-minute grid. GitHub delivers cron
-    # late (this repo has seen 28 minutes) and drops ticks under load, so a missed tick
-    # must cost one sample rather than a whole hour of coverage.
+    # A tick every ten minutes, but each job collects for twelve, so consecutive jobs
+    # overlap and every grid point is covered twice. GitHub delivers cron late (this
+    # repo has seen 28 minutes) and drops ticks under load; the overlap means a single
+    # dropped tick loses nothing at all, and the collector re-aligns to the 10-minute
+    # grid after its first cycle, so late delivery does not shift the sample times.
     - cron: '1,11,21,31,41,51 * * * *'
 
 permissions:
   contents: read
 
 concurrency:
-  # Scheduled samples never queue behind each other; only manual batches serialise.
+  # Scheduled jobs are meant to overlap, so each gets its own group and never queues.
+  # Only manual batches serialise against each other.
   group: traffic-collection-${{ github.event_name == 'schedule' && github.run_id || 'manual' }}
   cancel-in-progress: false
 
@@ -41,8 +44,9 @@ jobs:
         id: window
         env:
           EVENT: ${{ github.event_name }}
-          MODE: ${{ inputs.mode || 'sample' }}
+          MODE: ${{ inputs.mode || 'batch' }}
           DURATION: ${{ inputs.duration_minutes || '55' }}
+          SCHEDULED_MINUTES: ${{ vars.SCHEDULED_BATCH_MINUTES || '12' }}
         run: |
           python - <<'PY'
           import os, sys
@@ -52,16 +56,17 @@ jobs:
           from run_collection_week import TRIAL_DIR, load_plan
           plan, start, end, cameras = load_plan(Path('reference/collection_week.json'))
           now = datetime.now(timezone.utc)
-          mode = 'sample' if os.environ['EVENT'] == 'schedule' else os.environ['MODE']
+          scheduled = os.environ['EVENT'] == 'schedule'
+          mode = 'batch' if scheduled else os.environ['MODE']
           minutes = 0.0
           if mode == 'batch':
-              minutes = float(os.environ['DURATION'])
+              minutes = float(os.environ['SCHEDULED_MINUTES'] if scheduled else os.environ['DURATION'])
               if not 0 < minutes <= 55:
                   raise SystemExit('Batch duration must be between 1 and 55 minutes')
-              minutes = max(0, min(minutes, (end - now).total_seconds() / 60))
-          run = mode == 'trial' or start <= now < end
+              minutes = min(minutes, (end - now).total_seconds() / 60)
+          run = mode == 'trial' or (start <= now < end and (mode != 'batch' or minutes > 0))
           path = TRIAL_DIR if mode == 'trial' else plan['output_dir']
-          label = {'sample': 'Single ten-minute sample', 'batch': 'Manual catch-up batch',
+          label = {'sample': 'Single ten-minute sample', 'batch': 'Overlapping collection batch',
                    'trial': 'One-round trial'}[mode]
           status = 'Starting' if run else 'Skipped: outside campaign window'
           print(f'{status}: {label}; duration={minutes:.2f} minutes; output={path}')
@@ -71,7 +76,7 @@ jobs:
                   summary.write(f'Duration limit: {minutes:.2f} minutes.\n\n')
               if now >= end:
                   summary.write('**The campaign window has closed.** Set the repository variable '
-                                '`COLLECTION_ENABLED` to `false` to stop billing a runner every ten minutes.\n')
+                                '`COLLECTION_ENABLED` to `false` to stop starting a runner every ten minutes.\n')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
               stream.write(f'run={str(run).lower()}\nmode={mode}\nminutes={minutes}\npath={path}\n')
           PY
@@ -102,4 +107,4 @@ jobs:
             ${{ steps.window.outputs.path }}/manifest.csv
             ${{ steps.window.outputs.path }}/state.json
           if-no-files-found: warn
-          retention-days: 30
+          retention-days: 90
