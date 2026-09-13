@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
     inputs:
       duration_minutes:
-        description: '0 = trial now; 1-55 = dated campaign batch'
-        default: '0'
+        description: 'Minutes to collect: 55 = campaign batch; 0 = one-round trial only'
+        default: '55'
         required: true
   schedule:
     # Every hour at minute 21 (also minute 21 in Asia/Singapore).
@@ -50,6 +50,13 @@ jobs:
           if not trial:
               minutes = max(0, min(minutes, (end - now).total_seconds() / 60))
           path = 'data/trial-eight-cameras' if trial else plan['output_dir']
+          mode = 'One-round trial' if trial else 'Campaign batch (10-minute sampling)'
+          status = 'Starting' if run else 'Skipped: outside campaign window'
+          print(f'{status}: {mode}; duration={minutes:.2f} minutes; output={path}')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write(f'## {mode}\n\n{status}. Duration limit: {minutes:.2f} minutes.\n\n')
+              summary.write(f'Output: `{path}`. Trigger: `{os.environ["EVENT"]}`.\n\n')
+              summary.write('A manual run starts this batch only; future scheduled runs depend on GitHub cron.\n')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
               stream.write(f'run={str(run).lower()}\nminutes={minutes}\npath={path}\n')
           PY

@@ -79,7 +79,9 @@ caffeinate -i python3 scripts/run_collection_week.py
 1. 确认默认分支上的 `reference/collection_week.json` 是上述一周计划。
 2. 到 Settings → Secrets and variables → Actions → Variables 新建
    `COLLECTION_ENABLED`，值为 `true`。
-3. 到 Actions 查看运行记录。要手动试采，运行工作流，`duration_minutes=0`。
+3. 到 Actions 查看运行记录。手动运行默认 `duration_minutes=55`，在计划窗口内
+   连续采集最多 55 分钟；只试采一轮时，明确改为 `duration_minutes=0`。
+   手动运行只启动当前一批，不会创建新的定时规则，也不代表 cron 已恢复。
 4. 停止后续排程，把 `COLLECTION_ENABLED` 改为 `false`。已有运行需在 Actions 中取消。
 
 也可以执行：
