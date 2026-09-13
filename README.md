@@ -69,7 +69,9 @@ caffeinate -i python3 scripts/run_collection_week.py
 
 ## 按旧项目方式使用 GitHub Actions
 
-工作流 `Collect eight traffic cameras` 已准备，持续排程默认关闭。
+工作流 `Collect eight traffic cameras` 已于 2026-09-13 启用，仓库变量
+`COLLECTION_ENABLED=true`，按上述 9 月 14–21 日窗口采集。
+本仓库的默认行为仍是：未设置该变量时关闭持续排程。
 本机不需要一直开机；不需要 AWS。图片保存到 GitHub Actions artifact，保留 30 天。
 
 启用步骤：
