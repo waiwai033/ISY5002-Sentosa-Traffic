@@ -2,6 +2,7 @@
 """Run the dated eight-camera campaign, or inspect/test it without starting it."""
 import argparse
 import json
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -31,7 +32,7 @@ def run(argv=None):
         print(json.dumps({**plan, 'camera_ids': [c['CameraID'] for c in cameras],
                           'road_groups': sorted({c['RoadSegment'] for c in cameras}),
                           'start_utc': start.isoformat(), 'end_utc': end.isoformat(),
-                          'planned_cycles': int((end-start).total_seconds() / (plan['interval_minutes']*60)),
+                          'planned_cycles': math.ceil((end-start).total_seconds() / (plan['interval_minutes']*60)),
                           'enabled': 'Check mode only; does not start or enable collection'}, indent=2))
         return 0
     output = 'data/trial-eight-cameras' if args.once else plan['output_dir']

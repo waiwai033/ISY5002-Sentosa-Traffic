@@ -1,6 +1,7 @@
 import csv
 import importlib.util
 import json
+import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
@@ -39,15 +40,18 @@ class CollectorTests(unittest.TestCase):
                           for group in {x['RoadSegment'] for x in cameras}},
                          {'causeway': 3, 'second_link': 3, 'sentosa_gateway': 2})
 
-    def test_week_plan_is_exactly_1008_rounds(self):
+    def test_week_plan_uses_minute_21_and_1006_rounds(self):
         plan = json.loads((c.ROOT / 'reference/collection_week.json').read_text())
         start, end = map(c.parse_timestamp, (plan['start_at'], plan['end_at']))
         self.assertEqual(start.weekday(), 6)
         self.assertEqual(start.astimezone(c.SG).weekday(), 0)
-        self.assertEqual((end-start).total_seconds() / (plan['interval_minutes']*60), 1008)
+        self.assertEqual(start.astimezone(c.SG).strftime('%H:%M'), '00:21')
+        self.assertEqual(math.ceil((end-start).total_seconds() / (plan['interval_minutes']*60)), 1006)
+        self.assertEqual((start+timedelta(minutes=1005*10)).astimezone(c.SG).strftime('%Y-%m-%d %H:%M'),
+                         '2026-09-20 23:51')
 
     def test_future_start_grid_and_exclusive_end(self):
-        anchor = datetime(2026, 9, 13, 16, tzinfo=timezone.utc)
+        anchor = datetime(2026, 9, 13, 16, 21, tzinfo=timezone.utc)
         clock = {'now': anchor - timedelta(seconds=2)}
         calls = []
         class FakeDatetime(datetime):
@@ -64,11 +68,13 @@ class CollectorTests(unittest.TestCase):
              patch.object(c.time, 'monotonic', side_effect=lambda: clock['now'].timestamp()), \
              patch.object(c.time, 'sleep', side_effect=sleep), \
              patch.object(c, 'collect_cycle', side_effect=collect):
-            code = c.main(['--start-at', c.iso(anchor), '--end-at', c.iso(anchor+timedelta(minutes=30)),
+            code = c.main(['--start-at', c.iso(anchor), '--end-at', c.iso(anchor+timedelta(minutes=60)),
                            '--interval-minutes', '10', '--active-start', '00:00',
                            '--output-dir', str(self.output)])
         self.assertEqual(code, 0)
-        self.assertEqual(calls, [anchor+timedelta(minutes=i) for i in (0,10,20)])
+        self.assertEqual(calls, [anchor+timedelta(minutes=i) for i in (0,10,20,30,40,50)])
+        self.assertEqual([t.astimezone(c.SG).strftime('%H:%M') for t in calls],
+                         ['00:21','00:31','00:41','00:51','01:01','01:11'])
 
     def test_expired_campaign_makes_no_requests(self):
         with patch.object(c, 'collect_cycle') as collect:
