@@ -79,9 +79,10 @@ caffeinate -i python3 scripts/run_collection_week.py
 1. 确认默认分支上的 `reference/collection_week.json` 是上述一周计划。
 2. 到 Settings → Secrets and variables → Actions → Variables 新建
    `COLLECTION_ENABLED`，值为 `true`。
-3. 到 Actions 查看运行记录。手动运行默认 `duration_minutes=55`，在计划窗口内
-   连续采集最多 55 分钟；只试采一轮时，明确改为 `duration_minutes=0`。
-   手动运行只启动当前一批，不会创建新的定时规则，也不代表 cron 已恢复。
+3. 到 Actions 查看运行记录。手动运行的 `mode` 默认 `sample`，补采一轮；
+   `batch` 配合 `duration_minutes` 连续采集最多 55 分钟；`trial` 采一轮但写到
+   试采目录，不进入正式数据集。
+   手动运行只启动当前这次，不会创建新的定时规则，也不代表 cron 已恢复。
 4. 停止后续排程，把 `COLLECTION_ENABLED` 改为 `false`。已有运行需在 Actions 中取消。
 
 也可以执行：
@@ -93,32 +94,40 @@ gh variable set COLLECTION_ENABLED --body true --repo waiwai033/ISY5002-Sentosa-
 gh variable set COLLECTION_ENABLED --body false --repo waiwai033/ISY5002-Sentosa-Traffic
 ```
 
-排程在每小时第 21 分钟启动，例如新加坡时间 00:21、01:21、02:21；cron 为
-`21 * * * *`，UTC 与新加坡时间的分钟数相同。
-每批最多 55 分钟，任务超时设为 60 分钟，为退出和上传预留约 5 分钟。
-采样基准是 9 月 14 日 00:21，因此计划时刻为 00:21、00:31、00:41、00:51、
-01:01、01:11、01:21，以此类推。每批启动后先采一轮，再对齐该基准；
-如果 GitHub 延迟启动，首轮会记录真实请求时间，后续回到上述时刻。
-批次交接可能造成少量间隔变化，实际时间以 manifest 为准。
-程序同时检查固定起止日期，开始前和结束后不会采图；采集结束后建议关闭开关，
-避免以后继续产生只检查时间的空运行。
+排程每 10 分钟触发一次，每次只采一轮就结束，cron 为
+`1,11,21,31,41,51 * * * *`，UTC 与新加坡时间的分钟数相同。
+采样基准是 9 月 14 日 00:21，对应时刻为 00:21、00:31、00:41、00:51、01:01、01:11，
+以此类推。单次任务约 30 秒采完 8 台摄像头，任务超时保留 60 分钟给手动 `batch`。
+程序同时检查固定起止日期，开始前和结束后不会采图；采集结束后务必关闭开关，
+否则每 10 分钟仍会起一个只检查时间的空运行。
 
-GitHub cron 可能延迟或丢弃触发，批次排队可能造成缺口，不能保证首轮精确在
-00:21 执行。如果时间连续性是硬要求，优先使用提前启动的常开机器或服务器。
-见 [GitHub 定时任务说明](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)。
+之所以不再用"每小时起一个 55 分钟长任务"：GitHub cron 会延迟甚至丢弃触发
+（本仓库 9 月 13 日 12:00 UTC 那次实际 12:28 才启动，迟了 28 分钟），
+长任务一旦错过就整小时没有数据，而且前一批未结束时下一次排程会卡在
+concurrency 队列里，越积越晚。改成一轮一个任务后，漏一次只少一个采样点，
+互相之间也不会排队。
 
-按每小时一批、每批最多 55 分钟计算，一周采集进程最多约 9,240 分钟，另加启动和上传开销。
-这是运行时长估算，不是已发生的用量。私有仓库一般会超出免费分钟额度；
-8 台摄像头本次试采合计约 1.60 MB/轮，一周原始 JPEG 约 1.61 GB，另有元数据，
-也可能超过附件存储额度。实际取决于账户套餐、剩余额度、图片变化和缺帧。
+按每 10 分钟一个短任务计算，一周约 1,008 次运行；GitHub 按分钟向上取整计费，
+约 1,008 分钟，低于私有仓库常见的 2,000 分钟免费额度（原方案约 9,240 分钟）。
+存储仍是瓶颈：8 台摄像头约 1.60 MB/轮，一周原始 JPEG 约 1.61 GB，另有元数据，
+会超过私有仓库 500 MB 的附件存储额度。要跑满一周，需要以下之一：
+仓库改为 public（标准 runner 的分钟与存储均免费）、采集期间定期下载并删除附件、
+或把采样间隔放宽到 20–30 分钟。实际取决于账户套餐、剩余额度、图片变化和缺帧。
 见 [GitHub 额度与限制](https://docs.github.com/en/actions/reference/limits)。
 AWS S3 可以作为未来的长期存储方案，但不会减少 GitHub 运行分钟消耗；本仓库当前
 没有 S3 上传功能。
 
+GitHub cron 仍可能延迟或丢弃触发，不能保证每一轮精确在计划时刻执行，
+manifest 记录的是真实请求时间。如果时间连续性是硬要求，优先使用常开机器或服务器。
+见 [GitHub 定时任务说明](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)。
+
 下载附件并及时归档：
 
 ```bash
+# 单次运行
 gh run download RUN_ID --repo waiwai033/ISY5002-Sentosa-Traffic --dir data/github/RUN_ID
+# 一次性取回全部采样附件，图片按 images/<camera_id>/<拍摄时间>.jpg 自然合并
+gh run download --repo waiwai033/ISY5002-Sentosa-Traffic --dir data/github/all
 ```
 
 不同 Actions 批次各自保存 manifest 和状态；合并时按 `camera_id + sha256` 去重，

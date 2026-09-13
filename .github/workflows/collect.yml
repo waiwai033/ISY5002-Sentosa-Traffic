@@ -3,19 +3,28 @@ name: Collect eight traffic cameras
 on:
   workflow_dispatch:
     inputs:
-      duration_minutes:
-        description: 'Minutes to collect: 55 = campaign batch; 0 = one-round trial only'
-        default: '55'
+      mode:
+        description: 'sample = one 8-camera cycle; batch = keep collecting; trial = one cycle outside the dataset'
+        type: choice
+        options: [sample, batch, trial]
+        default: sample
         required: true
+      duration_minutes:
+        description: 'batch mode only: minutes to keep collecting (1-55)'
+        default: '55'
+        required: false
   schedule:
-    # Every hour at minute 21 (also minute 21 in Asia/Singapore).
-    - cron: '21 * * * *'
+    # One short job per sample, on the campaign's ten-minute grid. GitHub delivers cron
+    # late (this repo has seen 28 minutes) and drops ticks under load, so a missed tick
+    # must cost one sample rather than a whole hour of coverage.
+    - cron: '1,11,21,31,41,51 * * * *'
 
 permissions:
   contents: read
 
 concurrency:
-  group: traffic-collection
+  # Scheduled samples never queue behind each other; only manual batches serialise.
+  group: traffic-collection-${{ github.event_name == 'schedule' && github.run_id || 'manual' }}
   cancel-in-progress: false
 
 jobs:
@@ -32,53 +41,61 @@ jobs:
         id: window
         env:
           EVENT: ${{ github.event_name }}
-          DURATION: ${{ inputs.duration_minutes || '0' }}
+          MODE: ${{ inputs.mode || 'sample' }}
+          DURATION: ${{ inputs.duration_minutes || '55' }}
         run: |
           python - <<'PY'
           import os, sys
           from datetime import datetime, timezone
           from pathlib import Path
           sys.path.insert(0, 'scripts')
-          from run_collection_week import load_plan
+          from run_collection_week import TRIAL_DIR, load_plan
           plan, start, end, cameras = load_plan(Path('reference/collection_week.json'))
           now = datetime.now(timezone.utc)
-          minutes = 55 if os.environ['EVENT'] == 'schedule' else float(os.environ['DURATION'])
-          if not 0 <= minutes <= 55:
-              raise SystemExit('Duration must be between 0 and 55 minutes')
-          trial = os.environ['EVENT'] == 'workflow_dispatch' and minutes == 0
-          run = trial or start <= now < end
-          if not trial:
+          mode = 'sample' if os.environ['EVENT'] == 'schedule' else os.environ['MODE']
+          minutes = 0.0
+          if mode == 'batch':
+              minutes = float(os.environ['DURATION'])
+              if not 0 < minutes <= 55:
+                  raise SystemExit('Batch duration must be between 1 and 55 minutes')
               minutes = max(0, min(minutes, (end - now).total_seconds() / 60))
-          path = 'data/trial-eight-cameras' if trial else plan['output_dir']
-          mode = 'One-round trial' if trial else 'Campaign batch (10-minute sampling)'
+          run = mode == 'trial' or start <= now < end
+          path = TRIAL_DIR if mode == 'trial' else plan['output_dir']
+          label = {'sample': 'Single ten-minute sample', 'batch': 'Manual catch-up batch',
+                   'trial': 'One-round trial'}[mode]
           status = 'Starting' if run else 'Skipped: outside campaign window'
-          print(f'{status}: {mode}; duration={minutes:.2f} minutes; output={path}')
+          print(f'{status}: {label}; duration={minutes:.2f} minutes; output={path}')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
-              summary.write(f'## {mode}\n\n{status}. Duration limit: {minutes:.2f} minutes.\n\n')
-              summary.write(f'Output: `{path}`. Trigger: `{os.environ["EVENT"]}`.\n\n')
-              summary.write('A manual run starts this batch only; future scheduled runs depend on GitHub cron.\n')
+              summary.write(f'## {label}\n\n{status}. Trigger: `{os.environ["EVENT"]}`. Output: `{path}`.\n\n')
+              if mode == 'batch':
+                  summary.write(f'Duration limit: {minutes:.2f} minutes.\n\n')
+              if now >= end:
+                  summary.write('**The campaign window has closed.** Set the repository variable '
+                                '`COLLECTION_ENABLED` to `false` to stop billing a runner every ten minutes.\n')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
-              stream.write(f'run={str(run).lower()}\nminutes={minutes}\npath={path}\n')
+              stream.write(f'run={str(run).lower()}\nmode={mode}\nminutes={minutes}\npath={path}\n')
           PY
       - name: Collect images and manifest
         if: steps.window.outputs.run == 'true'
         env:
           DATA_GOV_SG_API_KEY: ${{ secrets.DATA_GOV_SG_API_KEY }}
           LTA_API_KEY: ${{ secrets.LTA_API_KEY }}
+          MODE: ${{ steps.window.outputs.mode }}
           MINUTES: ${{ steps.window.outputs.minutes }}
         run: |
           python - <<'PY'
           import os, subprocess, sys
-          minutes = float(os.environ['MINUTES'])
+          mode = os.environ['MODE']
           command = [sys.executable, 'scripts/run_collection_week.py']
-          command += ['--once'] if minutes == 0 else ['--max-runtime-minutes', str(minutes)]
+          command += {'sample': ['--sample'], 'trial': ['--once']}.get(
+              mode, ['--max-runtime-minutes', os.environ['MINUTES']])
           subprocess.run(command, check=True)
           PY
       - name: Preserve images and metadata
         if: always() && steps.window.outputs.run == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: traffic-images-${{ github.run_id }}-${{ github.run_attempt }}
+          name: traffic-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ steps.window.outputs.path }}/images/
             ${{ steps.window.outputs.path }}/metadata/

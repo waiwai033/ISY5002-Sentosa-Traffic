@@ -8,6 +8,8 @@ from pathlib import Path
 
 from fetch_lta_camera_images import ROOT, load_cameras, main, parse_timestamp, positive
 
+TRIAL_DIR = 'data/trial-eight-cameras'
+
 
 def load_plan(path):
     plan = json.loads(path.read_text())
@@ -25,6 +27,8 @@ def run(argv=None):
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--check', action='store_true')
     mode.add_argument('--once', action='store_true', help='Trial now; saves outside campaign dataset')
+    mode.add_argument('--sample', action='store_true',
+                      help='One campaign cycle now; skipped outside the campaign window')
     parser.add_argument('--max-runtime-minutes', type=positive, help='Limit one GitHub worker batch')
     args = parser.parse_args(argv)
     plan, start, end, cameras = load_plan(args.config)
@@ -35,11 +39,19 @@ def run(argv=None):
                           'planned_cycles': math.ceil((end-start).total_seconds() / (plan['interval_minutes']*60)),
                           'enabled': 'Check mode only; does not start or enable collection'}, indent=2))
         return 0
-    output = 'data/trial-eight-cameras' if args.once else plan['output_dir']
+    output = TRIAL_DIR if args.once else plan['output_dir']
     command = ['--camera-csv', str(ROOT / plan['camera_csv']), '--output-dir', str(ROOT / output),
                '--source', plan['source'], '--interval-minutes', str(plan['interval_minutes']),
                '--active-start', plan['active_start'], '--active-end', plan['active_end']]
     if args.once:
+        command += ['--once']
+    elif args.sample:
+        # One cycle per worker: a delayed or dropped cron tick costs a single sample,
+        # not the whole hour, and each job bills about a minute instead of fifty-five.
+        now = datetime.now(timezone.utc)
+        if not start <= now < end:
+            print('Campaign window is not open; no sample taken')
+            return 0
         command += ['--once']
     else:
         command += ['--start-at', plan['start_at'], '--end-at', plan['end_at']]
