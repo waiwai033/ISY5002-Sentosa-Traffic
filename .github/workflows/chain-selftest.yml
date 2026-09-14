@@ -1,0 +1,23 @@
+name: Chain self-test
+
+# Throwaway probe: proves GITHUB_TOKEN can dispatch collect.yml, which is what the
+# collection chain relies on to renew itself. Delete once the answer is recorded.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dispatch collect.yml using GITHUB_TOKEN
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh workflow run collect.yml -f mode=trial
+          echo "dispatch call returned exit code $?"
