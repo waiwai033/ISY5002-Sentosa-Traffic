@@ -14,30 +14,73 @@ on:
         default: '55'
         required: false
   schedule:
-    # Backstop only. GitHub delivered 3 of ~42 ticks here over seven hours (7%), and
-    # missed one tick that had 3h23m of registration lead time, so the campaign cannot
-    # depend on cron. Each delivered tick instead restarts the self-renewing chain,
-    # and the concurrency group cancels ticks that arrive while the chain is healthy.
+    # Watchdog only; this never collects. GitHub delivered 3 of roughly 42 ticks here
+    # over seven hours, so cron is far too lossy to drive collection. A tick that does
+    # land just checks the chain is alive and restarts it if it is not.
     - cron: '1,11,21,31,41,51 * * * *'
 
 permissions:
   contents: read
   actions: write
 
-concurrency:
-  # Every chain link shares one group, so a backstop tick that lands while the chain
-  # is alive is cancelled instead of starting a second chain. Manual one-offs get their
-  # own group and never queue behind the chain.
-  group: traffic-${{ (github.event_name == 'schedule' || inputs.mode == 'chain') && 'chain' || format('manual-{0}', github.run_id) }}
-  cancel-in-progress: false
-
 jobs:
+  # A scheduled tick must never queue behind the chain: it would sit pending for hours
+  # and then start ahead of the chain's own hand-over. It gets its own group, checks in
+  # a few seconds, and exits.
+  watchdog:
+    if: github.event_name == 'schedule' && vars.COLLECTION_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: traffic-watchdog
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restart the chain only if it has stopped
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          python - <<'PY'
+          import json, os, subprocess, sys
+          from datetime import datetime, timezone
+          from pathlib import Path
+          sys.path.insert(0, 'scripts')
+          from run_collection_week import load_plan
+          plan, start, end, _ = load_plan(Path('reference/collection_week.json'))
+          now = datetime.now(timezone.utc)
+          listing = subprocess.run(
+              ['gh', 'run', 'list', '--workflow', 'collect.yml', '--limit', '40',
+               '--json', 'databaseId,status'],
+              capture_output=True, text=True, check=True).stdout
+          mine = int(os.environ['RUN_ID'])
+          busy = {'in_progress', 'queued', 'pending', 'waiting', 'requested'}
+          alive = [r for r in json.loads(listing)
+                   if r['databaseId'] != mine and r['status'] in busy]
+          if not start <= now < end:
+              verdict = 'Outside the campaign window; not restarting'
+          elif alive:
+              verdict = f'{len(alive)} collection run(s) already alive; nothing to restart'
+          else:
+              subprocess.run(['gh', 'workflow', 'run', 'collect.yml', '-f', 'mode=chain'], check=True)
+              verdict = 'No collection run was alive; restarted the chain'
+          print(verdict)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write(f'## Chain watchdog\n\n{verdict}.\n')
+          PY
+
   collect:
     # Manual one-offs always run; anything that chains needs the kill switch on, so
-    # setting COLLECTION_ENABLED to false stops the chain at its next link.
-    if: (github.event_name == 'workflow_dispatch' && inputs.mode != 'chain') || vars.COLLECTION_ENABLED == 'true'
+    # clearing COLLECTION_ENABLED stops the chain at its next link.
+    if: github.event_name == 'workflow_dispatch' && (inputs.mode != 'chain' || vars.COLLECTION_ENABLED == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 355
+    concurrency:
+      # Chain links share one group so two chains can never run at once. Manual
+      # one-offs get their own group and never queue behind a five-hour window.
+      group: traffic-${{ inputs.mode == 'chain' && 'chain' || format('manual-{0}', github.run_id) }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -46,8 +89,7 @@ jobs:
       - name: Validate campaign window
         id: window
         env:
-          EVENT: ${{ github.event_name }}
-          MODE: ${{ inputs.mode || 'chain' }}
+          MODE: ${{ inputs.mode }}
           DURATION: ${{ inputs.duration_minutes || '55' }}
           CHAIN_MINUTES: ${{ vars.CHAIN_BATCH_MINUTES || '340' }}
         run: |
@@ -59,7 +101,7 @@ jobs:
           from run_collection_week import TRIAL_DIR, load_plan
           plan, start, end, cameras = load_plan(Path('reference/collection_week.json'))
           now = datetime.now(timezone.utc)
-          mode = 'chain' if os.environ['EVENT'] == 'schedule' else os.environ['MODE']
+          mode = os.environ['MODE']
           minutes = 0.0
           if mode in ('chain', 'batch'):
               limit = 350 if mode == 'chain' else 55
@@ -67,19 +109,19 @@ jobs:
               if not 0 < minutes <= limit:
                   raise SystemExit(f'{mode} duration must be between 1 and {limit} minutes')
               minutes = min(minutes, (end - now).total_seconds() / 60)
-          run = mode == 'trial' or (start <= now < end and (mode in ('sample', 'trial') or minutes > 0))
+          run = mode == 'trial' or (start <= now < end and (mode == 'sample' or minutes > 0))
           path = TRIAL_DIR if mode == 'trial' else plan['output_dir']
           label = {'chain': 'Self-renewing collection window', 'sample': 'Single ten-minute sample',
                    'batch': 'Bounded catch-up batch', 'trial': 'One-round trial'}[mode]
           status = 'Starting' if run else 'Skipped: outside campaign window'
           print(f'{status}: {label}; duration={minutes:.2f} minutes; output={path}')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
-              summary.write(f'## {label}\n\n{status}. Trigger: `{os.environ["EVENT"]}`. Output: `{path}`.\n\n')
+              summary.write(f'## {label}\n\n{status}. Output: `{path}`.\n\n')
               if minutes:
                   summary.write(f'Duration limit: {minutes:.2f} minutes.\n\n')
               if now >= end:
                   summary.write('**The campaign window has closed.** Set the repository variable '
-                                '`COLLECTION_ENABLED` to `false` so no further runs start.\n')
+                                '`COLLECTION_ENABLED` to `false` so the watchdog stops restarting it.\n')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
               stream.write(f'run={str(run).lower()}\nmode={mode}\nminutes={minutes}\npath={path}\n')
               stream.write(f'started={time.time()}\n')
@@ -130,7 +172,7 @@ jobs:
           now = datetime.now(timezone.utc)
           elapsed = (time.time() - float(os.environ['STARTED'])) / 60
           # A window that died young would otherwise hand over immediately and spin.
-          # Below the floor the chain stops and the cron backstop is left to restart it.
+          # Below the floor the chain stops and the watchdog is left to restart it.
           if now >= end:
               reason = 'the campaign window has closed'
           elif elapsed < 30:
