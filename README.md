@@ -119,8 +119,13 @@ gh variable set COLLECTION_ENABLED --body false --repo waiwai033/ISY5002-Sentosa
 > 和 `repository_dispatch` 是明确的例外。本仓库已实测验证：探针派发后 8 秒，
 > 新的 run 正常创建并成功执行。
 
-cron 保留为**兜底**：链路断掉时，某次侥幸送达的 tick 会重新拉起链路；
-链路健康时，这些 tick 会被共享的 concurrency group 直接取消。
+cron 保留为**看门狗**，它**不采集任何数据**，只回答一个问题：当前还有没有活着的采集运行？
+没有就派发一个新链路，有就立刻退出，整个检查几秒钟完成。
+
+> 早期版本让排程运行直接采集、并和链路共享同一个 concurrency group，
+> 结果排程运行会 pending 卡住整整 5 个多小时，还会抢在链路自己的交棒前面启动
+> （run #14 就是这样被卡了 7 分钟后手动取消的）。
+> 现在看门狗有独立的 concurrency group，永远不会排在采集后面。
 
 防失控的四道闸：
 
