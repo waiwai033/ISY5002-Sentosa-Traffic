@@ -79,10 +79,9 @@ caffeinate -i python3 scripts/run_collection_week.py
 1. 确认默认分支上的 `reference/collection_week.json` 是上述一周计划。
 2. 到 Settings → Secrets and variables → Actions → Variables 新建
    `COLLECTION_ENABLED`，值为 `true`。
-3. 到 Actions 查看运行记录。手动运行的 `mode` 默认 `sample`，补采一轮；
-   `batch` 配合 `duration_minutes` 连续采集最多 55 分钟；`trial` 采一轮但写到
-   试采目录，不进入正式数据集。
-   手动运行只启动当前这次，不会创建新的定时规则，也不代表 cron 已恢复。
+3. 到 Actions 查看运行记录。手动运行的 `mode` 默认 `chain`，启动一个自续接的
+   长采集窗口；`sample` 补采一轮；`batch` 配合 `duration_minutes` 采集最多 55 分钟；
+   `trial` 采一轮但写到试采目录，不进入正式数据集。
 4. 停止后续排程，把 `COLLECTION_ENABLED` 改为 `false`。已有运行需在 Actions 中取消。
 
 也可以执行：
@@ -94,33 +93,48 @@ gh variable set COLLECTION_ENABLED --body true --repo waiwai033/ISY5002-Sentosa-
 gh variable set COLLECTION_ENABLED --body false --repo waiwai033/ISY5002-Sentosa-Traffic
 ```
 
-排程每 10 分钟触发一次，cron 为 `1,11,21,31,41,51 * * * *`，
-UTC 与新加坡时间的分钟数相同。**每次任务采集 12 分钟**（可用仓库变量
-`SCHEDULED_BATCH_MINUTES` 调整），比触发间隔长 2 分钟，因此相邻两次任务互相重叠、
-每个采样点都被覆盖两次 —— 漏掉一次 cron 不会造成任何缺口。
+### 为什么不靠 cron
 
-采样基准是 9 月 14 日 00:21，对应时刻为 00:21、00:31、00:41、00:51、01:01、01:11，
-以此类推。任务启动后先立即采一轮，随后由 `next_tick` 对齐到上述基准，
-所以即使 GitHub 延迟派发，后续采样仍然精确落在整十分钟点上
-（实测：17:06:58 启动的任务，第二轮准确落在 17:11:00）。
-程序同时检查固定起止日期，开始前和结束后不会采图；采集结束后务必关闭开关，
-否则每 10 分钟仍会起一个只检查时间的空运行。
+实测这个仓库的 GitHub cron **极不可靠**：
 
-之所以不用"每小时起一个 55 分钟长任务"：GitHub cron 会延迟甚至丢弃触发
-（本仓库 9 月 13 日 12:00 UTC 那次实际 12:28 才启动，迟了 28 分钟），
-长任务一旦错过就整小时没有数据，而且前一批未结束时下一次排程会卡在
-concurrency 队列里，越积越晚。改成短任务重叠覆盖后，单次漏触发不丢数据，
-排程任务之间也不再排队（各自独立的 concurrency group）。
+| cron | 机会 | 实际派发 |
+|---|---|---|
+| `0 21,2,7,12 * * *` | 12:00Z | 12:28Z（迟 28 分钟）|
+| `0 16,22,4,10 * * *` | 16:00Z | **未派发**（提前 3h23m 就注册好了）|
+| `21 * * * *` | 16:21Z | 未派发 |
+| `1,11,21,31,41,51 * * * *` | 9/13 17:00Z–9/14 00:54Z 约 42 次 | **仅 3 次**（19:10、21:25、23:17）|
 
-本仓库已转为 **public**，标准 runner 的运行分钟与附件存储均免费，
-不再受私有仓库 2,000 分钟 / 500 MB 免费额度的限制。
-参考量级：8 台摄像头约 1.60 MB/轮，一周原始 JPEG 约 1.61 GB（重叠采集后
-artifact 总量约两倍，但合并时同一帧文件名与 sha256 相同，会直接互相覆盖，
-最终数据集不会变大）。见 [GitHub 额度与限制](https://docs.github.com/en/actions/reference/limits)。
+到达率约 7%，而 `workflow_dispatch` 手动触发至今 **100% 成功**。
+按每次 12 分钟的短窗口算，7 小时里只覆盖了约 8% 的时间 —— cron 不能作为主要触发方式。
 
-GitHub cron 仍可能延迟或丢弃触发，不能保证每一轮精确在计划时刻执行，
-manifest 记录的是真实请求时间。如果时间连续性是硬要求，优先使用常开机器或服务器。
-见 [GitHub 定时任务说明](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)。
+### 自续接长窗口
+
+每次运行连续采集最多 **340 分钟**（可用仓库变量 `CHAIN_BATCH_MINUTES` 调整，
+上限 350；GitHub 单任务硬上限 6 小时），内部由 `next_tick` 对齐到 9/14 00:21 的
+10 分钟网格，**完全不依赖 cron 的定时精度**。
+运行结束前，用 `GITHUB_TOKEN` 调 `gh workflow run` 派发下一个窗口。
+一周只需约 28 次接力，而不是 1,008 次 cron 触发。
+
+> `GITHUB_TOKEN` 触发的事件通常不会产生新的 workflow run，但 `workflow_dispatch`
+> 和 `repository_dispatch` 是明确的例外。本仓库已实测验证：探针派发后 8 秒，
+> 新的 run 正常创建并成功执行。
+
+cron 保留为**兜底**：链路断掉时，某次侥幸送达的 tick 会重新拉起链路；
+链路健康时，这些 tick 会被共享的 concurrency group 直接取消。
+
+防失控的四道闸：
+
+1. 只在采集窗口内派发后继，9/21 之后自动停
+2. 运行不足 **30 分钟**不派发 —— 崩溃的窗口不会变成高速空转循环
+3. 每个窗口只派发一个后继，不会增殖；chain 类运行共享同一个 concurrency group，
+   同时最多 1 跑 1 等
+4. `COLLECTION_ENABLED` 设为 `false` 会让下一个链接被跳过，链路随即终止
+
+本仓库已转为 **public**，标准 runner 的运行分钟与附件存储均免费。
+参考量级：8 台摄像头约 1.60 MB/轮，一周原始 JPEG 约 1.61 GB。
+见 [GitHub 额度与限制](https://docs.github.com/en/actions/reference/limits)。
+
+manifest 记录的始终是真实请求时间，采样时刻以 manifest 为准。
 
 下载附件并及时归档：
 
