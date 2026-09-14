@@ -4,37 +4,40 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'sample = one 8-camera cycle; batch = keep collecting; trial = one cycle outside the dataset'
+        description: 'chain = long self-renewing window; sample = one cycle; batch = bounded run; trial = one cycle outside the dataset'
         type: choice
-        options: [sample, batch, trial]
-        default: sample
+        options: [chain, sample, batch, trial]
+        default: chain
         required: true
       duration_minutes:
         description: 'batch mode only: minutes to keep collecting (1-55)'
         default: '55'
         required: false
   schedule:
-    # A tick every ten minutes, but each job collects for twelve, so consecutive jobs
-    # overlap and every grid point is covered twice. GitHub delivers cron late (this
-    # repo has seen 28 minutes) and drops ticks under load; the overlap means a single
-    # dropped tick loses nothing at all, and the collector re-aligns to the 10-minute
-    # grid after its first cycle, so late delivery does not shift the sample times.
+    # Backstop only. GitHub delivered 3 of ~42 ticks here over seven hours (7%), and
+    # missed one tick that had 3h23m of registration lead time, so the campaign cannot
+    # depend on cron. Each delivered tick instead restarts the self-renewing chain,
+    # and the concurrency group cancels ticks that arrive while the chain is healthy.
     - cron: '1,11,21,31,41,51 * * * *'
 
 permissions:
   contents: read
+  actions: write
 
 concurrency:
-  # Scheduled jobs are meant to overlap, so each gets its own group and never queues.
-  # Only manual batches serialise against each other.
-  group: traffic-collection-${{ github.event_name == 'schedule' && github.run_id || 'manual' }}
+  # Every chain link shares one group, so a backstop tick that lands while the chain
+  # is alive is cancelled instead of starting a second chain. Manual one-offs get their
+  # own group and never queue behind the chain.
+  group: traffic-${{ (github.event_name == 'schedule' || inputs.mode == 'chain') && 'chain' || format('manual-{0}', github.run_id) }}
   cancel-in-progress: false
 
 jobs:
   collect:
-    if: github.event_name == 'workflow_dispatch' || vars.COLLECTION_ENABLED == 'true'
+    # Manual one-offs always run; anything that chains needs the kill switch on, so
+    # setting COLLECTION_ENABLED to false stops the chain at its next link.
+    if: (github.event_name == 'workflow_dispatch' && inputs.mode != 'chain') || vars.COLLECTION_ENABLED == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -44,41 +47,42 @@ jobs:
         id: window
         env:
           EVENT: ${{ github.event_name }}
-          MODE: ${{ inputs.mode || 'batch' }}
+          MODE: ${{ inputs.mode || 'chain' }}
           DURATION: ${{ inputs.duration_minutes || '55' }}
-          SCHEDULED_MINUTES: ${{ vars.SCHEDULED_BATCH_MINUTES || '12' }}
+          CHAIN_MINUTES: ${{ vars.CHAIN_BATCH_MINUTES || '340' }}
         run: |
           python - <<'PY'
-          import os, sys
+          import os, sys, time
           from datetime import datetime, timezone
           from pathlib import Path
           sys.path.insert(0, 'scripts')
           from run_collection_week import TRIAL_DIR, load_plan
           plan, start, end, cameras = load_plan(Path('reference/collection_week.json'))
           now = datetime.now(timezone.utc)
-          scheduled = os.environ['EVENT'] == 'schedule'
-          mode = 'batch' if scheduled else os.environ['MODE']
+          mode = 'chain' if os.environ['EVENT'] == 'schedule' else os.environ['MODE']
           minutes = 0.0
-          if mode == 'batch':
-              minutes = float(os.environ['SCHEDULED_MINUTES'] if scheduled else os.environ['DURATION'])
-              if not 0 < minutes <= 55:
-                  raise SystemExit('Batch duration must be between 1 and 55 minutes')
+          if mode in ('chain', 'batch'):
+              limit = 350 if mode == 'chain' else 55
+              minutes = float(os.environ['CHAIN_MINUTES'] if mode == 'chain' else os.environ['DURATION'])
+              if not 0 < minutes <= limit:
+                  raise SystemExit(f'{mode} duration must be between 1 and {limit} minutes')
               minutes = min(minutes, (end - now).total_seconds() / 60)
-          run = mode == 'trial' or (start <= now < end and (mode != 'batch' or minutes > 0))
+          run = mode == 'trial' or (start <= now < end and (mode in ('sample', 'trial') or minutes > 0))
           path = TRIAL_DIR if mode == 'trial' else plan['output_dir']
-          label = {'sample': 'Single ten-minute sample', 'batch': 'Overlapping collection batch',
-                   'trial': 'One-round trial'}[mode]
+          label = {'chain': 'Self-renewing collection window', 'sample': 'Single ten-minute sample',
+                   'batch': 'Bounded catch-up batch', 'trial': 'One-round trial'}[mode]
           status = 'Starting' if run else 'Skipped: outside campaign window'
           print(f'{status}: {label}; duration={minutes:.2f} minutes; output={path}')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
               summary.write(f'## {label}\n\n{status}. Trigger: `{os.environ["EVENT"]}`. Output: `{path}`.\n\n')
-              if mode == 'batch':
+              if minutes:
                   summary.write(f'Duration limit: {minutes:.2f} minutes.\n\n')
               if now >= end:
                   summary.write('**The campaign window has closed.** Set the repository variable '
-                                '`COLLECTION_ENABLED` to `false` to stop starting a runner every ten minutes.\n')
+                                '`COLLECTION_ENABLED` to `false` so no further runs start.\n')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
               stream.write(f'run={str(run).lower()}\nmode={mode}\nminutes={minutes}\npath={path}\n')
+              stream.write(f'started={time.time()}\n')
           PY
       - name: Collect images and manifest
         if: steps.window.outputs.run == 'true'
@@ -108,3 +112,38 @@ jobs:
             ${{ steps.window.outputs.path }}/state.json
           if-no-files-found: warn
           retention-days: 90
+      - name: Hand over to the next collection window
+        # Runs even when collection failed, so one bad window does not end the campaign.
+        if: always() && steps.window.outputs.mode == 'chain' && steps.window.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          STARTED: ${{ steps.window.outputs.started }}
+        run: |
+          python - <<'PY'
+          import os, subprocess, sys, time
+          from datetime import datetime, timezone
+          from pathlib import Path
+          sys.path.insert(0, 'scripts')
+          from run_collection_week import load_plan
+          plan, start, end, _ = load_plan(Path('reference/collection_week.json'))
+          now = datetime.now(timezone.utc)
+          elapsed = (time.time() - float(os.environ['STARTED'])) / 60
+          # A window that died young would otherwise hand over immediately and spin.
+          # Below the floor the chain stops and the cron backstop is left to restart it.
+          if now >= end:
+              reason = 'the campaign window has closed'
+          elif elapsed < 30:
+              reason = f'this window lasted only {elapsed:.1f} minutes, below the 30-minute floor'
+          else:
+              reason = None
+          if reason:
+              print(f'Not handing over: {reason}')
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+                  summary.write(f'\nNo hand-over: {reason}.\n')
+              raise SystemExit(0)
+          subprocess.run(['gh', 'workflow', 'run', 'collect.yml', '-f', 'mode=chain'], check=True)
+          print(f'Handed over after {elapsed:.1f} minutes; next window dispatched')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write(f'\nHanded over to the next window after {elapsed:.1f} minutes.\n')
+          PY
