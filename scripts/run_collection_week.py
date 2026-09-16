@@ -43,6 +43,10 @@ def run(argv=None):
     command = ['--camera-csv', str(ROOT / plan['camera_csv']), '--output-dir', str(ROOT / output),
                '--source', plan['source'], '--interval-minutes', str(plan['interval_minutes']),
                '--active-start', plan['active_start'], '--active-end', plan['active_end']]
+    # Quiet-hour frames sit unrefreshed for hours; without this the collector rejects
+    # them as stale and the dataset loses its overnight samples entirely.
+    if plan.get('max_age_minutes'):
+        command += ['--max-age-minutes', str(plan['max_age_minutes'])]
     if args.once:
         command += ['--once']
     elif args.sample:

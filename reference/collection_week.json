@@ -6,5 +6,6 @@
   "end_at": "2026-09-21T00:00:00+08:00",
   "interval_minutes": 10,
   "active_start": "00:00",
-  "active_end": "24:00"
+  "active_end": "24:00",
+  "max_age_minutes": 240
 }
