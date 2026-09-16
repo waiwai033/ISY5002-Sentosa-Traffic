@@ -153,6 +153,37 @@ gh run download --repo waiwai033/ISY5002-Sentosa-Traffic --dir data/github/all
 不同 Actions 批次各自保存 manifest 和状态；合并时按 `camera_id + sha256` 去重，
 不把多个不同摄像头的相似画面当成同一观测。附件应在 30 天内下载。
 
+## 浏览已采集的图像
+
+先把 artifact 拉到本地，再生成相册：
+
+```bash
+# 拉取全部 artifact（按 run 分目录）
+for r in $(gh api repos/waiwai033/ISY5002-Sentosa-Traffic/actions/artifacts --paginate \
+  -q '.artifacts[] | select(.expired==false) | .workflow_run.id' | sort -u); do
+  gh run download "$r" --dir "data/github/all/$r"
+done
+
+# 生成相册（缩略图 + HTML，约 30 秒 / 2000 帧）
+python3 scripts/build_gallery.py
+```
+
+相册需要通过 HTTP 打开（浏览器不允许 `file://` 页面读取同目录以外的图片）：
+
+```bash
+python3 -m http.server 8791
+```
+
+然后访问 http://localhost:8791/data/gallery/index.html
+
+功能：按摄像头、日期、时段（夜间/早晚高峰/白天）筛选；**网格**视图按日分组、
+缩略图懒加载、点击放大；**时间轴**视图把某台摄像头的序列当延时片播放，
+支持 ← → 单帧步进和空格播放暂停。每帧标注拍摄时间和**帧龄**
+（拍摄到采集的间隔），帧龄超过 20 分钟会标橙色，便于识别静止时段。
+
+缩略图由 macOS 自带的 `sips` 生成（约 23 KB/张），原图按需加载。
+重复运行只补新增帧，不会重做已有缩略图。
+
 ## 数据来源与密钥
 
 默认使用 [data.gov.sg 实时交通图像接口](https://api.data.gov.sg/v1/transport/traffic-images)，
